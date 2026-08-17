@@ -1,0 +1,1240 @@
+{
+  "name": "Kiron Labs - Rob - LinkedIn Content Curation v1",
+  "nodes": [
+    {
+      "id": "n1",
+      "name": "Note - Required Credentials and Variables",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -460,
+        -420
+      ],
+      "parameters": {
+        "width": 460,
+        "height": 460,
+        "content": "## Required credentials\n- **DeepSeek API - Rob** (HTTP Header Auth, header `Authorization: Bearer <key>`)\n- **Google Sheets - Rob** (OAuth2)\n- **Telegram - Rob** (Bot Token)\n\n## Environment variables (Settings > Variables or .env)\n- `TELEGRAM_CHAT_ID_ROB` — Rob's Telegram chat_id\n- `DRY_RUN` — 'true' or 'false'. When 'true' the draft is generated but NOT logged to Sheets and NOT sent for real review (only a Telegram preview).\n\nThe spreadsheet ID is already embedded directly in the Google Sheets nodes.\n\n## Before activating\n1. Create the 'RSS-Sources' tab in the sheet (see note below) and load it with the initial sources.\n2. Create the 'Rob-LinkedIn' tab in the sheet with the columns described in the note on the right.\n3. Set up the Telegram bot and add the inline buttons (already included) for approve/discard.\n4. This workflow NEVER auto-publishes to LinkedIn. It only prepares drafts for human review.\n5. Also import 'Rob - RSS Sources Health Check v1' — it validates the URLs weekly and notifies you on Telegram if any breaks."
+      }
+    },
+    {
+      "id": "n1b",
+      "name": "Note - Google Sheets Columns (tab RSS-Sources)",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -460,
+        -900
+      ],
+      "parameters": {
+        "width": 460,
+        "height": 300,
+        "content": "## Columns of the 'RSS-Sources' tab\n- source_name\n- url\n- category (engineering_blog | em | ai_for_teams)\n- active (TRUE/FALSE) — to add or remove a source without touching the workflow, just edit this column or delete/add the row\n- last_checked\n- last_status (ok | error: <detail>)\n\nThis main workflow only reads rows with active = TRUE. Automatic URL validation runs in the separate 'Rob - RSS Sources Health Check v1' workflow, which updates last_checked and last_status every week."
+      }
+    },
+    {
+      "id": "n2",
+      "name": "Note - Google Sheets Columns (tab Rob-LinkedIn)",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1600,
+        -420
+      ],
+      "parameters": {
+        "width": 420,
+        "height": 460,
+        "content": "## Columns of the 'Rob-LinkedIn' tab\n- date\n- profile\n- channel\n- sources_consulted\n- article_title\n- article_url\n- draft_content\n- content_hash\n- status  (pending review | approved for publishing | discarded | published)\n- published_at\n- telegram_message_id\n- day_topic (the topic assigned that day according to the fixed M-F rotation, for traceability)\n\nThe status is updated automatically when Rob replies with the Telegram buttons (Approve / Discard). The actual LinkedIn publishing remains a manual step or a separate workflow — this workflow only prepares and logs the draft.\n\n## Daily topic rotation (fixed, editable in the 'Code - Topic of the Day' node)\nMonday: AI applied to team leadership\nTuesday: Developer Experience and productivity\nWednesday: Process improvement (Planning, Sprint, PR Reviews, onboarding)\nThursday: Practical Engineering Management with measurable results\nFriday: Backend, platforms and sustainable architectures"
+      }
+    },
+    {
+      "id": "n3",
+      "name": "Trigger - Daily 7am M-F (CDMX)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -460,
+        60
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 7 * * 1-5"
+            }
+          ]
+        },
+        "notes": "Runs Monday to Friday at 7:00am Mexico City time"
+      },
+      "notesInFlow": true,
+      "notes": "Runs Monday to Friday at 7:00am Mexico City time"
+    },
+    {
+      "id": "n4",
+      "name": "Sheets - Read Full History",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -220,
+        60
+      ],
+      "parameters": {
+        "resource": "sheet",
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "1iP_rbtxoPvyU54ZW0BHUfCInn19-sXUUEcb4yxKsQ0E"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Rob-LinkedIn"
+        },
+        "options": {
+          "returnAllMatches": true
+        },
+        "notes": "Reads the full history to check the daily limit and dedupe content"
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "",
+          "name": "Google Sheets - Rob"
+        }
+      },
+      "notes": "Reads the full history to check the daily limit and dedupe content"
+    },
+    {
+      "id": "n5",
+      "name": "Code - Check Daily Limit",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        60
+      ],
+      "parameters": {
+        "jsCode": "const today = $now.toFormat('yyyy-MM-dd');\nconst rows = $input.all().map(i => i.json);\nconst activeStatuses = ['pending review', 'approved for publishing', 'published'];\n\nconst todayRows = rows.filter(r => {\n  const d = (r.date || '').toString().slice(0, 10);\n  return d === today && r.profile === 'Rob' && r.channel === 'LinkedIn' && activeStatuses.includes(r.status);\n});\n\nreturn [{\n  json: {\n    limitReached: todayRows.length >= 1,\n    countToday: todayRows.length,\n    today\n  }\n}];",
+        "notes": "Counts today's posts for the Rob profile / LinkedIn channel. Limit: 1 per day."
+      },
+      "notes": "Counts today's posts for the Rob profile / LinkedIn channel. Limit: 1 per day."
+    },
+    {
+      "id": "n6",
+      "name": "IF - Limit Reached",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        220,
+        60
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.limitReached }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "n7",
+      "name": "Telegram - Notify Limit Reached",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        440,
+        -60
+      ],
+      "parameters": {
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID_ROB }}",
+        "text": "=ℹ️ Rob - LinkedIn Content Curation: there is already an active post for today ({{ $json.today }}). No new content generated.",
+        "additionalFields": {}
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram - Rob"
+        }
+      }
+    },
+    {
+      "id": "n8",
+      "name": "End - Limit Reached",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        660,
+        -60
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "n9c",
+      "name": "Code - Topic of the Day",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        200
+      ],
+      "parameters": {
+        "jsCode": "const rotation = {\n  1: 'AI applied to engineering team leadership (processes, decisions, culture — AI as an enabler, never the protagonist)',\n  2: 'Developer Experience and engineering productivity (tools, friction, team velocity)',\n  3: 'Engineering process improvement (Planning, Sprint, PR Reviews, onboarding)',\n  4: 'Practical Engineering Management with measurable results (management decisions, 1:1s, feedback, team structure)',\n  5: 'Backend, platforms and sustainable architectures (technical decisions that impact the team and the cost)'\n};\n\nconst weekday = $now.weekday; // Luxon: 1=Monday ... 7=Sunday\nconst topic = rotation[weekday] || rotation[1];\nconst weekdayNames = { 1: 'Monday', 2: 'Tuesday', 3: 'Wednesday', 4: 'Thursday', 5: 'Friday' };\n\nreturn [{ json: { topic, weekdayName: weekdayNames[weekday] || 'Monday' } }];",
+        "notes": "Fixed daily topic rotation by weekday (M-F). Edit the mapping here to change the topic order."
+      },
+      "notes": "Fixed daily topic rotation by weekday (M-F). Edit the mapping here to change the topic order."
+    },
+    {
+      "id": "n9b",
+      "name": "Sheets - Read Active RSS Sources",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        440,
+        60
+      ],
+      "parameters": {
+        "resource": "sheet",
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "1iP_rbtxoPvyU54ZW0BHUfCInn19-sXUUEcb4yxKsQ0E"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "RSS-Fuentes"
+        },
+        "options": {
+          "returnAllMatches": true
+        },
+        "notes": "Reads the RSS source catalog. Rob adds/removes/activates rows here, without touching the workflow."
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "",
+          "name": "Google Sheets - Rob"
+        }
+      },
+      "notes": "Reads the RSS source catalog. Rob adds/removes/activates rows here, without touching the workflow."
+    },
+    {
+      "id": "n9",
+      "name": "Code - Fetch and Parse RSS Sources",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        60
+      ],
+      "parameters": {
+        "jsCode": "const isTrue = (v) => v === true || String(v).trim().toUpperCase() === 'TRUE';\n\nconst sources = $input.all()\n  .map(i => i.json)\n  .filter(row => isTrue(row.active) && row.url)\n  .map(row => ({ name: row.source_name || row.url, url: row.url }));\n\nconst getTag = (block, tag) => {\n  const re = new RegExp(`<${tag}[^>]*>([\\\\s\\\\S]*?)<\\\\/${tag}>`, 'i');\n  const m = block.match(re);\n  if (!m) return '';\n  return m[1].replace(/<!\\[CDATA\\[|\\]\\]>/g, '').replace(/<[^>]+>/g, '').trim();\n};\n\nconst getAtomLink = (block) => {\n  const tagMatch = block.match(/<link[^>]*>/i);\n  if (!tagMatch) return '';\n  const tag = tagMatch[0];\n  const hrefIdx = tag.indexOf('href=');\n  if (hrefIdx === -1) return '';\n  const rest = tag.slice(hrefIdx + 5);\n  const quoteChar = rest[0];\n  const endIdx = rest.indexOf(quoteChar, 1);\n  if (endIdx === -1) return '';\n  return rest.slice(1, endIdx);\n};\n\nconst allArticles = [];\n\nfor (const source of sources) {\n  try {\n    const response = await this.helpers.httpRequest({\n      method: 'GET',\n      url: source.url,\n      timeout: 10000\n    });\n\n    const xml = typeof response === 'string' ? response : String(response);\n    const itemBlocks = xml.match(/<item[\\s\\S]*?<\\/item>/g) || xml.match(/<entry[\\s\\S]*?<\\/entry>/g) || [];\n\n    for (const block of itemBlocks.slice(0, 5)) {\n      const title = getTag(block, 'title');\n      let link = getTag(block, 'link');\n      if (!link) link = getAtomLink(block);\n      const pubDate = getTag(block, 'pubDate') || getTag(block, 'published') || getTag(block, 'updated');\n      const summary = (getTag(block, 'description') || getTag(block, 'summary')).slice(0, 500);\n\n      if (title && link) {\n        allArticles.push({ source: source.name, title, link, pubDate, summary });\n      }\n    }\n  } catch (error) {\n    allArticles.push({ source: source.name, error: true, message: error.message });\n  }\n}\n\nreturn allArticles.map(a => ({ json: a }));",
+        "notes": "Downloads and parses RSS/Atom feeds from Engineering blogs, EM and AI applied to teams. Verify URLs periodically."
+      },
+      "notes": "Downloads and parses RSS/Atom feeds from Engineering blogs, EM and AI applied to teams. Verify URLs periodically."
+    },
+    {
+      "id": "n10",
+      "name": "Code - Dedupe Against History",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        160
+      ],
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst history = $('Sheets - Read Full History').all().map(i => i.json);\nconst knownHashes = new Set(history.map(r => r.content_hash).filter(Boolean));\nconst knownUrls = new Set(history.map(r => r.article_url).filter(Boolean));\n\nconst input = $input.all().map(i => i.json).filter(a => !a.error);\n\nconst deduped = [];\nconst seenInBatch = new Set();\n\nfor (const article of input) {\n  const hash = crypto.createHash('sha256').update(article.link).digest('hex');\n  if (knownHashes.has(hash) || knownUrls.has(article.link) || seenInBatch.has(hash)) continue;\n  seenInBatch.add(hash);\n  deduped.push({ ...article, url_hash: hash });\n}\n\nreturn [{ json: { articles: deduped, count: deduped.length } }];",
+        "notes": "Compares by URL hash and exact URL against the Sheets history. Returns a single item with the array of new articles."
+      },
+      "notes": "Compares by URL hash and exact URL against the Sheets history. Returns a single item with the array of new articles."
+    },
+    {
+      "id": "n11",
+      "name": "IF - Has New Articles",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        880,
+        160
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.count }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "n12",
+      "name": "Telegram - Notify No New Articles",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1100,
+        280
+      ],
+      "parameters": {
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID_ROB }}",
+        "text": "=ℹ️ Rob - LinkedIn Content Curation: no new articles found (no duplicates) in today's sources.",
+        "additionalFields": {}
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram - Rob"
+        }
+      }
+    },
+    {
+      "id": "n13",
+      "name": "End - No New Articles",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1320,
+        280
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "n14",
+      "name": "DeepSeek - Filter Relevant Articles",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1100,
+        60
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.deepseek.com/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'deepseek-chat', temperature: 0.2, response_format: { type: 'json_object' }, messages: [ { role: 'system', content: 'You are the LinkedIn content editor for Roberto Barcenas, an Engineering Manager actively looking for an EM or Head of Engineering role. Positioning: an EM who uses AI as an enabler to improve processes, develop teams and increase engineering productivity. AI is never the protagonist; the team and the working system are. Topics that YES: AI applied to team leadership, developer experience, process improvement such as planning, sprint, PR reviews, onboarding, practical engineering management with measurable results, sustainable backend and platforms, real cases with metrics. Topics that NO: model benchmarks, GPT vs Claude vs DeepSeek comparisons, prompts and prompting techniques, generic AI news without a leadership angle, generic corporate content. Today the priority topic of the day is: ' + $('Code - Topic of the Day').first().json.topic + '. Give preference to articles that connect with that topic even if they touch other angles of the positioning; if none connects well with the topic of the day, still select the most relevant ones for the overall positioning. You will receive a list of articles in JSON. Select at most 3 that best serve this positioning and discard the rest. Respond only with a JSON with this exact shape: { selected: [ { title: string, link: string, source: string, summary: string, reason: string } ] }. If none apply, respond { selected: [] }.' }, { role: 'user', content: JSON.stringify($json.articles) } ] }) }}",
+        "options": {},
+        "notes": "Selects at most 3 articles aligned with the editorial line. Discards benchmarks, comparisons and generic AI news."
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "",
+          "name": "DeepSeek API - Rob"
+        }
+      },
+      "notes": "Selects at most 3 articles aligned with the editorial line. Discards benchmarks, comparisons and generic AI news."
+    },
+    {
+      "id": "n15",
+      "name": "Code - Parse DeepSeek Selection",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        60
+      ],
+      "parameters": {
+        "jsCode": "const raw = $json.choices?.[0]?.message?.content || '{}';\nlet parsed;\ntry {\n  parsed = JSON.parse(raw);\n} catch (e) {\n  throw new Error('DeepSeek did not return valid JSON in the filtering step: ' + raw.slice(0, 300));\n}\n\nconst selected = (parsed.selected || []).slice(0, 3);\n\nif (selected.length === 0) {\n  return [{ json: { noSelection: true } }];\n}\n\nreturn selected.map(s => ({ json: { ...s, noSelection: false } }));"
+      }
+    },
+    {
+      "id": "n16",
+      "name": "IF - Has Selection",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1540,
+        60
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.noSelection }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "n17",
+      "name": "Telegram - Notify None Relevant",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1760,
+        180
+      ],
+      "parameters": {
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID_ROB }}",
+        "text": "=ℹ️ Rob - LinkedIn Content Curation: DeepSeek reviewed today's articles and none fit the editorial line. No drafts generated.",
+        "additionalFields": {}
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram - Rob"
+        }
+      }
+    },
+    {
+      "id": "n18",
+      "name": "End - None Relevant",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1980,
+        180
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "n19",
+      "name": "DeepSeek - Generate Post Draft",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1760,
+        -60
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.deepseek.com/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'deepseek-chat', temperature: 0.6, response_format: { type: 'json_object' }, messages: [ { role: 'system', content: 'You write LinkedIn posts for Roberto Barcenas, an Engineering Manager looking for an EM or Head of Engineering role earning above 150000 MXN per month. Your voice is that of an informed curator, not someone who lived the story as the protagonist: you found an interesting article or topic and you share it with your take on why it matters for other Engineering Managers and engineering leaders. You must generate the draft in TWO languages: Spanish (ES) first and English (EN) after. Each version must read as a complete and natural post written by a native speaker of that language, not as a literal word-by-word translation, but telling the same content. Mandatory style in both languages: conversational and direct, like someone sharing something they found and found valuable, not like a neutral reporter nor like someone narrating a personal team experience they did not live. Short sentences, one idea per sentence or paragraph. Lots of visual space between blocks, little dense prose. Use first person ONLY to present the finding and your opinion about it, never to narrate an invented team story (avoid decidimos, empezamos, nos dimos cuenta, agregamos, and their English equivalents we decided, we started, we realized, we added, unless the original article literally describes an experience of Roberto, which is not the case). Instead use frames like: I found this article or topic, it seems relevant to me because, what caught my attention is, this connects with a problem I often see in engineering teams. Professional but natural language: Engineering Manager, Planning Poker, Story Points, PR, CI, QA, etc, when they are a real part of the content. It must not sound inspirational; the reason why the topic matters has to be supported by argument, not generic enthusiasm. Totally avoid phrases with this generic AI-written pattern, in any language: the problem was not X but Y, the problem is real, and here comes the interesting part, but that was not all, the real question is, and how do you do it, this changed the game, more than a tool it is, AI did not come to replace, it is not about X but about Y. Even if grammatically correct they do not sound natural, they sound engineered for engagement. The post must show: what you found (the concrete topic or finding of the article), why it seems relevant to you for an Engineering Manager or engineering leader (your opinion, with concrete argument, not empty enthusiasm), and data or metrics from the article if they exist, integrated into the explanation, not as a loose corporate KPI. This post is standalone; do not add continuity phrases toward previous or next posts. Emojis: use them as visual elements, at most one per important block, never as decoration nor in excess. Allowed set and meaning: rocket for start or launch, clipboard for process or tasks, bar chart for metrics or results, gear for engineering or technical process, robot for AI, lightning for impact or speed, joker for Planning Poker, link for repository or source. Sources: always include the source of the article or topic explicitly and separated from your opinion, marked with the book or link emoji before the link, making it clear that this is what you found and this is what you think about it. AI is never the protagonist of the content unless the article topic is literally about AI, and in that case it is treated as a tool within an engineering process, never as the protagonist of a personal story. Final rule: share what you found and why it matters to you, do not invent an experience you did not have, and do not tell the reader what to think, give your reasoning and let them draw their own conclusion. If a sentence sounds like it was written to sound good on LinkedIn instead of sharing a real finding with an honest opinion, remove it. Today the priority topic is: ' + $('Code - Topic of the Day').first().json.topic + '. Connect the draft with that angle whenever the article allows it, in both languages. Max 1100 characters per version (ES and EN counted separately). Respond only with a JSON with this exact shape: { draft_es: string, draft_en: string }.' }, { role: 'user', content: JSON.stringify({ title: $json.title, link: $json.link, source: $json.source, summary: $json.summary, reason: $json.reason }) } ] }) }}",
+        "options": {},
+        "notes": "Runs once per selected article (at most 3)."
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "",
+          "name": "DeepSeek API - Rob"
+        }
+      },
+      "notes": "Runs once per selected article (at most 3)."
+    },
+    {
+      "id": "n20",
+      "name": "Code - Prepare Draft and Hash",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1980,
+        -60
+      ],
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst response = $json;\nlet draftEs = '';\nlet draftEn = '';\ntry {\n  const parsed = JSON.parse(response.choices?.[0]?.message?.content || '{}');\n  draftEs = parsed.draft_es || '';\n  draftEn = parsed.draft_en || '';\n} catch (e) {\n  draftEs = response.choices?.[0]?.message?.content || '';\n  draftEn = '';\n}\n\ndraftEs = (draftEs || '').trim().slice(0, 1100);\ndraftEn = (draftEn || '').trim().slice(0, 1100);\n\nconst draftText = draftEs + '\\n\\n\\u2014\\n\\n\\ud83c\\uddfa\\ud83c\\uddf8 English version\\n\\n' + draftEn;\n\nconst article = $('Code - Parse DeepSeek Selection').item.json;\nconst dayTopic = $('Code - Topic of the Day').first().json.topic;\nconst contentHash = crypto.createHash('sha256').update(draftText).digest('hex');\n\nreturn [{\n  json: {\n    date: $now.toFormat('yyyy-MM-dd'),\n    profile: 'Rob',\n    channel: 'LinkedIn',\n    sources_consulted: article.source || '',\n    article_title: article.title || '',\n    article_url: article.link || '',\n    draft_content: draftText,\n    content_hash: contentHash,\n    status: 'pending review',\n    published_at: '',\n    telegram_message_id: '',\n    day_topic: dayTopic\n  }\n}];"
+      }
+    },
+    {
+      "id": "n21",
+      "name": "IF - Dry Run Mode",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2200,
+        -60
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $env.DRY_RUN }}",
+              "rightValue": "true",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "n22",
+      "name": "Telegram - Dry Run Preview",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2420,
+        -180
+      ],
+      "parameters": {
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID_ROB }}",
+        "text": "=🧪 DRY RUN — nothing was logged or sent for real review.\n\nTopic of the day: {{ $json.day_topic }}\nSource: {{ $json.sources_consulted }}\nArticle: {{ $json.article_title }}\n\nGenerated draft:\n{{ $json.draft_content }}",
+        "additionalFields": {}
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram - Rob"
+        }
+      }
+    },
+    {
+      "id": "n23",
+      "name": "End - Dry Run",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2640,
+        -180
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "n24",
+      "name": "Sheets - Register Pending Review",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        2420,
+        60
+      ],
+      "parameters": {
+        "resource": "sheet",
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "1iP_rbtxoPvyU54ZW0BHUfCInn19-sXUUEcb4yxKsQ0E"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Rob-LinkedIn"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {}
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "",
+          "name": "Google Sheets - Rob"
+        }
+      }
+    },
+    {
+      "id": "n25",
+      "name": "Code - Format Telegram Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2640,
+        60
+      ],
+      "parameters": {
+        "jsCode": "const row = $json;\nconst callbackId = row.content_hash.slice(0, 16);\n\nconst text = '📝 New draft for review — Rob LinkedIn\\n\\n' +\n  'Topic of the day: ' + row.day_topic + '\\n\\n' +\n  'Source: ' + row.sources_consulted + '\\n' +\n  'Article: ' + row.article_title + '\\n' + row.article_url + '\\n\\n' +\n  'Draft:\\n' + row.draft_content;\n\nreturn [{ json: { ...row, telegram_text: text, callback_id: callbackId } }];"
+      }
+    },
+    {
+      "id": "n26",
+      "name": "Telegram - Send Draft for Review",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2860,
+        60
+      ],
+      "parameters": {
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID_ROB }}",
+        "text": "={{ $json.telegram_text }}",
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "✅ Aprobar",
+                    "additionalFields": {
+                      "callback_data": "=approve|{{ $json.callback_id }}"
+                    }
+                  },
+                  {
+                    "text": "❌ Descartar",
+                    "additionalFields": {
+                      "callback_data": "=discard|{{ $json.callback_id }}"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "additionalFields": {},
+        "notes": "Rob decides from Telegram: Approve or Discard. The actual LinkedIn publishing remains manual/another workflow."
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram - Rob"
+        }
+      },
+      "notes": "Rob decides from Telegram: Approve or Discard. The actual LinkedIn publishing remains manual/another workflow."
+    },
+    {
+      "id": "n27",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        -460,
+        620
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "n28",
+      "name": "Code - Format Error Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -240,
+        620
+      ],
+      "parameters": {
+        "jsCode": "const data = $json;\nconst errorMessage = data.execution?.error?.message || 'Error desconocido';\nconst lastNode = data.execution?.lastNodeExecuted || 'N/A';\nconst workflowName = data.workflow?.name || 'Rob - LinkedIn Content Curation v1';\n\nreturn [{\n  json: {\n    text: '🚨 Error en ' + workflowName + '\\n\\nNodo: ' + lastNode + '\\nMensaje: ' + errorMessage\n  }\n}];"
+      }
+    },
+    {
+      "id": "n29",
+      "name": "Telegram - Notify Critical Error",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        -20,
+        620
+      ],
+      "parameters": {
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID_ROB }}",
+        "text": "={{ $json.text }}",
+        "additionalFields": {}
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram - Rob"
+        }
+      }
+    },
+    {
+      "id": "n30",
+      "name": "Trigger - Telegram Review Response",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -460,
+        900
+      ],
+      "parameters": {
+        "updates": [
+          "callback_query"
+        ]
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram - Rob"
+        }
+      }
+    },
+    {
+      "id": "n31",
+      "name": "Code - Parse Callback",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -240,
+        900
+      ],
+      "parameters": {
+        "jsCode": "const cb = $json.callback_query;\nif (!cb) {\n  return [];\n}\n\nconst parts = (cb.data || '').split('|');\nconst decision = parts[0];\nconst callbackId = parts[1];\n\nreturn [{\n  json: {\n    decision,\n    callback_id: callbackId,\n    from: cb.from?.username || cb.from?.id,\n    callback_query_id: cb.id,\n    chat_id: cb.message?.chat?.id,\n    message_id: cb.message?.message_id\n  }\n}];"
+      }
+    },
+    {
+      "id": "n32",
+      "name": "Sheets - Read History for Match",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -20,
+        900
+      ],
+      "parameters": {
+        "resource": "sheet",
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "1iP_rbtxoPvyU54ZW0BHUfCInn19-sXUUEcb4yxKsQ0E"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Rob-LinkedIn"
+        },
+        "options": {
+          "returnAllMatches": true
+        }
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "",
+          "name": "Google Sheets - Rob"
+        }
+      }
+    },
+    {
+      "id": "n33",
+      "name": "Code - Match Row by Hash",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        200,
+        900
+      ],
+      "parameters": {
+        "jsCode": "const target = $('Code - Parse Callback').item.json;\nconst rows = $input.all().map(i => i.json);\nconst match = rows.find(r => (r.content_hash || '').startsWith(target.callback_id));\n\nif (!match) {\n  return [{ json: { ...target, found: false } }];\n}\n\nreturn [{ json: { ...target, found: true, content_hash: match.content_hash } }];"
+      }
+    },
+    {
+      "id": "n34",
+      "name": "IF - Row Found",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        420,
+        900
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.found }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "n35",
+      "name": "Sheets - Update Status from Review",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        640,
+        800
+      ],
+      "parameters": {
+        "resource": "sheet",
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "1iP_rbtxoPvyU54ZW0BHUfCInn19-sXUUEcb4yxKsQ0E"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Rob-LinkedIn"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "matchingColumns": [
+            "content_hash"
+          ],
+          "value": {
+            "content_hash": "={{ $json.content_hash }}",
+            "status": "={{ $json.decision === 'approve' ? 'aprobado para publicar' : 'descartado' }}"
+          }
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "",
+          "name": "Google Sheets - Rob"
+        }
+      }
+    },
+    {
+      "id": "n36",
+      "name": "Telegram - Confirm Review",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        860,
+        800
+      ],
+      "parameters": {
+        "resource": "callback",
+        "operation": "answerQuery",
+        "queryId": "={{ $('Code - Parse Callback').item.json.callback_query_id }}",
+        "text": "={{ $('Code - Parse Callback').item.json.decision === 'approve' ? 'Recorded as approved ✅' : 'Recorded as discarded ❌' }}",
+        "additionalFields": {}
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram - Rob"
+        }
+      }
+    },
+    {
+      "id": "n37",
+      "name": "Telegram - Matching Error",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        640,
+        1020
+      ],
+      "parameters": {
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID_ROB }}",
+        "text": "=⚠️ No row found in Sheets for the draft with callback_id {{ $json.callback_id }}. Check manually.",
+        "additionalFields": {}
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram - Rob"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Trigger - Daily 7am M-F (CDMX)": {
+      "main": [
+        [
+          {
+            "node": "Sheets - Read Full History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sheets - Read Full History": {
+      "main": [
+        [
+          {
+            "node": "Code - Check Daily Limit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Check Daily Limit": {
+      "main": [
+        [
+          {
+            "node": "IF - Limit Reached",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF - Limit Reached": {
+      "main": [
+        [
+          {
+            "node": "Telegram - Notify Limit Reached",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Code - Topic of the Day",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Topic of the Day": {
+      "main": [
+        [
+          {
+            "node": "Sheets - Read Active RSS Sources",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram - Notify Limit Reached": {
+      "main": [
+        [
+          {
+            "node": "End - Limit Reached",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sheets - Read Active RSS Sources": {
+      "main": [
+        [
+          {
+            "node": "Code - Fetch and Parse RSS Sources",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Fetch and Parse RSS Sources": {
+      "main": [
+        [
+          {
+            "node": "Code - Dedupe Against History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Dedupe Against History": {
+      "main": [
+        [
+          {
+            "node": "IF - Has New Articles",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF - Has New Articles": {
+      "main": [
+        [
+          {
+            "node": "DeepSeek - Filter Relevant Articles",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Telegram - Notify No New Articles",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram - Notify No New Articles": {
+      "main": [
+        [
+          {
+            "node": "End - No New Articles",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DeepSeek - Filter Relevant Articles": {
+      "main": [
+        [
+          {
+            "node": "Code - Parse DeepSeek Selection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Parse DeepSeek Selection": {
+      "main": [
+        [
+          {
+            "node": "IF - Has Selection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF - Has Selection": {
+      "main": [
+        [
+          {
+            "node": "Telegram - Notify None Relevant",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "DeepSeek - Generate Post Draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram - Notify None Relevant": {
+      "main": [
+        [
+          {
+            "node": "End - None Relevant",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DeepSeek - Generate Post Draft": {
+      "main": [
+        [
+          {
+            "node": "Code - Prepare Draft and Hash",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Prepare Draft and Hash": {
+      "main": [
+        [
+          {
+            "node": "IF - Dry Run Mode",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF - Dry Run Mode": {
+      "main": [
+        [
+          {
+            "node": "Telegram - Dry Run Preview",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Sheets - Register Pending Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram - Dry Run Preview": {
+      "main": [
+        [
+          {
+            "node": "End - Dry Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sheets - Register Pending Review": {
+      "main": [
+        [
+          {
+            "node": "Code - Format Telegram Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Format Telegram Message": {
+      "main": [
+        [
+          {
+            "node": "Telegram - Send Draft for Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Code - Format Error Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Format Error Message": {
+      "main": [
+        [
+          {
+            "node": "Telegram - Notify Critical Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trigger - Telegram Review Response": {
+      "main": [
+        [
+          {
+            "node": "Code - Parse Callback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Parse Callback": {
+      "main": [
+        [
+          {
+            "node": "Sheets - Read History for Match",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sheets - Read History for Match": {
+      "main": [
+        [
+          {
+            "node": "Code - Match Row by Hash",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Match Row by Hash": {
+      "main": [
+        [
+          {
+            "node": "IF - Row Found",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF - Row Found": {
+      "main": [
+        [
+          {
+            "node": "Sheets - Update Status from Review",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Telegram - Matching Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sheets - Update Status from Review": {
+      "main": [
+        [
+          {
+            "node": "Telegram - Confirm Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "errorWorkflow": ""
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "pinData": {}
+}
