@@ -11,5 +11,5 @@ workflows split into two thin pieces:
 - **Caller** — Schedule Trigger + profile config → `Execute Workflow` (Engine)
 - **Approval** — Telegram Trigger (profile's own bot) → match in Sheets → update
 
-When a new profile is added (BarMon, BeCalm, Don Mario, La Tienda), only its Caller +
+When a new profile is added, only its Caller +
 Approval need to be built — the Engine does not change.

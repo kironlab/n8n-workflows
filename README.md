@@ -69,7 +69,7 @@ Defined in `infra/docker-compose.yml`. None are secret except if you decide to r
 - `DeepSeek API - Rob` — Header Auth (`Authorization: Bearer sk-...`)
 - `Telegram - Rob` — Bot Token (bot: **Kiron Labs**)
 
-Each new profile (BarMon, BeCalm, Don Mario, La Tienda) brings its own set: its own Telegram bot, and if applicable its own Instagram/Facebook credentials.
+Each new profile brings its own set: its own Telegram bot, and if applicable its own Instagram/Facebook credentials.
 
 ## Naming convention
 
