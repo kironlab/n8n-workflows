@@ -43,6 +43,16 @@ Currently in progress: the Engine is being designed on top of Rob's workflow (fi
 | `kiron-lab-rob-rss-sources-health-check-v1.json` | Kiron Labs - Rob - RSS Sources Health Check v1 | Weekly validation of every URL in the `RSS-Sources` tab, alerts via Telegram if any active source is broken | Monday 8:00 AM (CDMX) |
 | `kiron-lab-rob-linkedin-content-curation-v1.json` | Kiron Labs - Rob - LinkedIn Content Curation v1 | Current version (pre-Engine, monolithic): finds articles, filters with DeepSeek, generates a bilingual ES/EN draft, sends it for Telegram review | Mon–Fri 10:00 AM (CDMX) |
 
+### Daily topic rotation
+
+| Day | Topic |
+|---|---|
+| Monday | AI applied to team leadership |
+| Tuesday | Developer Experience and productivity |
+| Wednesday | Process improvement (Planning, Sprint, PR Reviews, onboarding) |
+| Thursday | Practical Engineering Management with measurable results |
+| Friday | Technology applied to real life in a light and pleasant way to close the work week |
+
 ## Infrastructure
 
 - **Server:** Hetzner Cloud CX23, Ubuntu 24.04, `128.140.12.184`
