@@ -1,0 +1,1007 @@
+{
+  "name": "Kiron Labs - Content Curation Engine v1",
+  "nodes": [
+    {
+      "id": "sticky-overview",
+      "name": "Sticky Note - Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -600,
+        -460
+      ],
+      "parameters": {
+        "width": 800,
+        "height": 440,
+        "content": "## Content Curation Engine v1 (v2 — client-agnostic)\n\nShared heavy logic, invoked by any client's Caller workflow via **Execute Workflow**. This Engine holds NO per-client identity (no Telegram bot, no social credentials) — n8n binds credentials per node at design time, not per run, so a bot/social credential can't be swapped dynamically inside a shared node. Sending to Telegram (and, later, publishing to social) is each client's own responsibility, done in their own Caller, with their own bot.\n\nWhat IS safely shared here: RSS fetch, dedup, DeepSeek relevance filter + draft generation, and Sheets read/write — `spreadsheet_id`/`sources_tab`/`content_tab` are parameters, so each client can own their own spreadsheet file (shared with the automation's Google account) without forking this workflow.\n\n**Output contract:** this workflow always ends at one of four leaf `Set` nodes, and whichever one actually ran is what `Execute Workflow` returns to the Caller: `{outcome: 'limit_reached' | 'no_new_content' | 'dry_run' | 'pending_review', ...}`. The Caller decides what to do with each outcome, including whether/how to notify Telegram.\n\n**Credentials needed:**\n- `Google Sheets - Rob` (OAuth2) — reused as-is; this is the automation's Google account, granted access to whichever client spreadsheet it's pointed at. Works for any client's own file, no new credential needed per client.\n- `DeepSeek API - Rob` (Generic Credential / HTTP Header Auth, `Authorization: Bearer <key>`) — reused as-is. DeepSeek isn't a per-client identity the way a bot is, so one shared key is fine; split it later only if billing needs to be separated per client, which just means swapping this one credential reference, not restructuring the workflow.\n- `Telegram - Rob` — used ONLY by the Error Trigger branch at the bottom, which is Rob's own ops/monitoring channel (platform operator, not a client-facing bot) — intentionally the one hardcoded exception, since a broken Engine affects every client and needs one place to report to.\n\n**Input contract (from Execute Workflow Trigger):**\n```\n{ profile, channel, spreadsheet_id, sources_tab, content_tab,\n  daily_limit, system_prompt_relevance, system_prompt_draft, dry_run }\n```"
+      }
+    },
+    {
+      "id": "trigger-engine-input",
+      "name": "Engine Input",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -600,
+        0
+      ],
+      "notes": "No telegram_chat_id here on purpose — the Engine never talks to Telegram. See Sticky Note.",
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "profile"
+            },
+            {
+              "name": "channel"
+            },
+            {
+              "name": "spreadsheet_id"
+            },
+            {
+              "name": "sources_tab"
+            },
+            {
+              "name": "content_tab"
+            },
+            {
+              "name": "daily_limit",
+              "type": "number"
+            },
+            {
+              "name": "system_prompt_relevance"
+            },
+            {
+              "name": "system_prompt_draft"
+            },
+            {
+              "name": "dry_run",
+              "type": "boolean"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "sheets-read-content-log",
+      "name": "Read Content Log",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -360,
+        0
+      ],
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $json.spreadsheet_id }}"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "={{ $json.content_tab }}"
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "IcCapGhz6b79YwIJ",
+          "name": "Google Sheets - Rob"
+        }
+      }
+    },
+    {
+      "id": "code-analyze-log",
+      "name": "Analyze Content Log",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -120,
+        0
+      ],
+      "notes": "Uses $now (Luxon, respects the workflow/instance timezone) instead of new Date().toISOString(), which is UTC and can misclassify 'today' near midnight in America/Mexico_City (UTC-6). No 'profile' filter on rows anymore — BarMon-Content has no profile column (removed 2026-08-20, redundant since each client now has their own spreadsheet), so every row in this tab already belongs to this run's profile by construction. Only 'channel' still distinguishes rows within the tab.",
+      "parameters": {
+        "jsCode": "const config = $('Engine Input').first().json;\nconst rows = items.map(i => i.json);\nconst today = $now.toFormat('yyyy-MM-dd');\nconst thirtyDaysAgo = $now.minus({ days: 30 }).toFormat('yyyy-MM-dd');\n\nconst todaysRows = rows.filter(r =>\n  r.date === today &&\n  r.channel === config.channel &&\n  ['approved', 'pending_review', 'published'].includes(r.status)\n);\n\nconst recentRows = rows.filter(r => r.date >= thirtyDaysAgo);\nconst recentUrls = new Set(recentRows.map(r => r.article_url).filter(Boolean));\nconst recentHashes = new Set(rows.map(r => r.content_hash).filter(Boolean));\n\nreturn [{\n  json: {\n    ...config,\n    today,\n    daily_count: todaysRows.length,\n    limit_reached: todaysRows.length >= config.daily_limit,\n    recent_urls: Array.from(recentUrls),\n    recent_hashes: Array.from(recentHashes)\n  }\n}];"
+      }
+    },
+    {
+      "id": "if-limit-reached",
+      "name": "Daily Limit Reached?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        120,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.limit_reached }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "set-result-limit-reached",
+      "name": "Build Result - Limit Reached",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        360,
+        -140
+      ],
+      "notes": "Leaf node — no Telegram send here. The Caller reads outcome='limit_reached' from Execute Workflow's return and decides whether/how to notify.",
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "name": "outcome",
+              "type": "string",
+              "value": "limit_reached"
+            },
+            {
+              "name": "profile",
+              "type": "string",
+              "value": "={{ $json.profile }}"
+            },
+            {
+              "name": "channel",
+              "type": "string",
+              "value": "={{ $json.channel }}"
+            },
+            {
+              "name": "daily_count",
+              "type": "number",
+              "value": "={{ $json.daily_count }}"
+            },
+            {
+              "name": "daily_limit",
+              "type": "number",
+              "value": "={{ $json.daily_limit }}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "sheets-read-sources",
+      "name": "Read Sources Tab",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        360,
+        140
+      ],
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $('Analyze Content Log').first().json.spreadsheet_id }}"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "={{ $('Analyze Content Log').first().json.sources_tab }}"
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "IcCapGhz6b79YwIJ",
+          "name": "Google Sheets - Rob"
+        }
+      }
+    },
+    {
+      "id": "code-filter-active-sources",
+      "name": "Filter Active Sources",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        600,
+        140
+      ],
+      "notes": "Only rows with active = TRUE are used.",
+      "parameters": {
+        "jsCode": "return items.filter(i => String(i.json.active).toUpperCase() === 'TRUE').map(i => ({\n  json: { source_name: i.json.source_name, url: i.json.url }\n}));"
+      }
+    },
+    {
+      "id": "rss-read",
+      "name": "Read RSS Feed",
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1.1,
+      "position": [
+        840,
+        140
+      ],
+      "notes": "Runs once per active source. If a feed is broken this item errors and the whole execution fails fast (fires the Error Trigger) — fix or deactivate the source row rather than silently skipping it.",
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "code-tag-source",
+      "name": "Tag Source Name",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1080,
+        140
+      ],
+      "notes": "Re-derives source_name via $runIndex since RSS Feed Read loses it (each run corresponds to one input source item, in order).",
+      "parameters": {
+        "jsCode": "const sourceItems = $('Filter Active Sources').all();\nconst sourceName = sourceItems[$runIndex] ? sourceItems[$runIndex].json.source_name : 'unknown';\n\nreturn items.map(i => ({\n  json: {\n    source_name: sourceName,\n    title: i.json.title,\n    link: i.json.link,\n    contentSnippet: i.json.contentSnippet || i.json.content || '',\n    isoDate: i.json.isoDate || i.json.pubDate || ''\n  }\n}));"
+      }
+    },
+    {
+      "id": "code-dedup-new-items",
+      "name": "Dedup New Items",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        140
+      ],
+      "parameters": {
+        "jsCode": "const recentUrls = new Set($('Analyze Content Log').first().json.recent_urls || []);\nconst seen = new Set();\nconst out = [];\nfor (const item of items) {\n  const url = item.json.link;\n  if (!url || recentUrls.has(url) || seen.has(url)) continue;\n  seen.add(url);\n  out.push(item);\n}\nreturn out;"
+      }
+    },
+    {
+      "id": "code-aggregate-candidates",
+      "name": "Aggregate Candidates",
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [
+        1560,
+        140
+      ],
+      "parameters": {
+        "aggregate": "aggregateAllItemData",
+        "destinationFieldName": "candidates"
+      }
+    },
+    {
+      "id": "if-no-new-items",
+      "name": "Any New Items?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1800,
+        140
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.candidates.length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "set-result-no-content",
+      "name": "Build Result - No New Content",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2040,
+        280
+      ],
+      "notes": "Leaf node — no Telegram send here.",
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "name": "outcome",
+              "type": "string",
+              "value": "no_new_content"
+            },
+            {
+              "name": "profile",
+              "type": "string",
+              "value": "={{ $('Analyze Content Log').first().json.profile }}"
+            },
+            {
+              "name": "channel",
+              "type": "string",
+              "value": "={{ $('Analyze Content Log').first().json.channel }}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "http-deepseek-relevance",
+      "name": "DeepSeek - Filter Relevance",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2040,
+        0
+      ],
+      "notes": "Fixed auth: DeepSeek has no native n8n credential type. Uses a Generic Credential (HTTP Header Auth) the same way the production Rob-LinkedIn workflow does. Expects strict JSON: {\"selected_index\": N, \"day_topic\": \"...\", \"reason\": \"...\"}. Fails fast on malformed output (fires the Error Trigger) rather than silently picking a wrong article.",
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.deepseek.com/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: \"deepseek-chat\",\n  temperature: 0.3,\n  response_format: { type: \"json_object\" },\n  messages: [\n    { role: \"system\", content: $('Analyze Content Log').first().json.system_prompt_relevance },\n    { role: \"user\", content: \"Candidatos (JSON array, elige por índice):\\n\" + JSON.stringify($json.candidates.map((c, idx) => ({ index: idx, source: c.source_name, title: c.title, snippet: c.contentSnippet, date: c.isoDate }))) + \"\\n\\nResponde SOLO JSON: {\\\"selected_index\\\": N, \\\"day_topic\\\": \\\"...\\\", \\\"reason\\\": \\\"...\\\"}\" }\n  ]\n}) }}",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "2gN8qJkQYlNFRtIl",
+          "name": "DeepSeek API - Rob"
+        }
+      }
+    },
+    {
+      "id": "code-parse-relevance",
+      "name": "Parse Relevance Selection",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2280,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const candidates = $('Aggregate Candidates').first().json.candidates;\nconst raw = $json.choices[0].message.content;\nlet parsed;\ntry {\n  parsed = JSON.parse(raw);\n} catch (e) {\n  throw new Error('DeepSeek relevance response was not valid JSON: ' + raw);\n}\nconst idx = parsed.selected_index;\nif (typeof idx !== 'number' || idx < 0 || idx >= candidates.length) {\n  throw new Error('DeepSeek returned an out-of-range selected_index: ' + idx);\n}\nconst selected = candidates[idx];\nreturn [{\n  json: {\n    ...$('Analyze Content Log').first().json,\n    article_title: selected.title,\n    article_url: selected.link,\n    article_snippet: selected.contentSnippet,\n    sources_consulted: selected.source_name,\n    day_topic: parsed.day_topic || selected.title\n  }\n}];"
+      }
+    },
+    {
+      "id": "http-deepseek-draft",
+      "name": "DeepSeek - Generate Draft",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2520,
+        0
+      ],
+      "notes": "Channel-specific draft — system_prompt_draft comes from the Caller, so the same Engine call produces different tone/length/CTA depending on which Caller invoked it.",
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.deepseek.com/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: \"deepseek-chat\",\n  temperature: 0.7,\n  messages: [\n    { role: \"system\", content: $json.system_prompt_draft },\n    { role: \"user\", content: \"Artículo fuente:\\nTítulo: \" + $json.article_title + \"\\nResumen: \" + $json.article_snippet + \"\\nFuente: \" + $json.sources_consulted + \"\\n\\nEscribe el post siguiendo el system prompt.\" }\n  ]\n}) }}",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "2gN8qJkQYlNFRtIl",
+          "name": "DeepSeek API - Rob"
+        }
+      }
+    },
+    {
+      "id": "code-build-content-row",
+      "name": "Build Content Row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2760,
+        0
+      ],
+      "notes": "Computes content_hash (SHA-256, full length — truncation for Telegram callback_data happens in the Caller, not here) and a safety-net dedup check against recent_hashes. 'profile' stays in this payload for the Caller's own messages/logging, but is NOT written to BarMon-Content — the next node maps columns explicitly and simply doesn't include it, since the sheet has no profile column.",
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst ctx = $('Parse Relevance Selection').first().json;\nconst draft = $json.choices[0].message.content.trim();\nconst hash = crypto.createHash('sha256').update(draft).digest('hex');\n\nconst recentHashes = new Set(ctx.recent_hashes || []);\nif (recentHashes.has(hash)) {\n  throw new Error('Generated draft hash matches a previously logged post - possible near-duplicate content. Aborting this run; rerun manually if this looks like a false positive.');\n}\n\nreturn [{\n  json: {\n    date: ctx.today,\n    profile: ctx.profile,\n    channel: ctx.channel,\n    sources_consulted: ctx.sources_consulted,\n    article_title: ctx.article_title,\n    article_url: ctx.article_url,\n    draft_content: draft,\n    content_hash: hash,\n    status: 'pending_review',\n    published_at: '',\n    telegram_message_id: '',\n    day_topic: ctx.day_topic,\n    dry_run: ctx.dry_run,\n    spreadsheet_id: ctx.spreadsheet_id,\n    content_tab: ctx.content_tab\n  }\n}];"
+      }
+    },
+    {
+      "id": "if-dry-run",
+      "name": "Dry Run?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3000,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.dry_run }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "set-result-dry-run",
+      "name": "Build Result - Dry Run",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        3240,
+        -140
+      ],
+      "notes": "Matches the production Rob-LinkedIn convention: dry run does NOT write to Sheets, it only returns the draft so the Caller can preview it via Telegram (its own bot).",
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "name": "outcome",
+              "type": "string",
+              "value": "dry_run"
+            },
+            {
+              "name": "profile",
+              "type": "string",
+              "value": "={{ $json.profile }}"
+            },
+            {
+              "name": "channel",
+              "type": "string",
+              "value": "={{ $json.channel }}"
+            },
+            {
+              "name": "day_topic",
+              "type": "string",
+              "value": "={{ $json.day_topic }}"
+            },
+            {
+              "name": "sources_consulted",
+              "type": "string",
+              "value": "={{ $json.sources_consulted }}"
+            },
+            {
+              "name": "article_title",
+              "type": "string",
+              "value": "={{ $json.article_title }}"
+            },
+            {
+              "name": "article_url",
+              "type": "string",
+              "value": "={{ $json.article_url }}"
+            },
+            {
+              "name": "draft_content",
+              "type": "string",
+              "value": "={{ $json.draft_content }}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "sheets-append-pending",
+      "name": "Log Draft (Pending Review)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        3240,
+        140
+      ],
+      "notes": "Explicit column mapping (not autoMapInputData) so extra fields carried in the input JSON for downstream use (profile, dry_run, spreadsheet_id, content_tab) are never written as stray columns — only the 11 real BarMon-Content columns are mapped. No 'profile' column (removed 2026-08-20).",
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $json.spreadsheet_id }}"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "={{ $json.content_tab }}"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "date": "={{ $json.date }}",
+            "channel": "={{ $json.channel }}",
+            "sources_consulted": "={{ $json.sources_consulted }}",
+            "article_title": "={{ $json.article_title }}",
+            "article_url": "={{ $json.article_url }}",
+            "draft_content": "={{ $json.draft_content }}",
+            "content_hash": "={{ $json.content_hash }}",
+            "status": "={{ $json.status }}",
+            "published_at": "={{ $json.published_at }}",
+            "telegram_message_id": "={{ $json.telegram_message_id }}",
+            "day_topic": "={{ $json.day_topic }}"
+          },
+          "schema": [
+            {
+              "id": "date",
+              "displayName": "date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "channel",
+              "displayName": "channel",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "sources_consulted",
+              "displayName": "sources_consulted",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "article_title",
+              "displayName": "article_title",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "article_url",
+              "displayName": "article_url",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "draft_content",
+              "displayName": "draft_content",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "content_hash",
+              "displayName": "content_hash",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "published_at",
+              "displayName": "published_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "telegram_message_id",
+              "displayName": "telegram_message_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "day_topic",
+              "displayName": "day_topic",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ]
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "IcCapGhz6b79YwIJ",
+          "name": "Google Sheets - Rob"
+        }
+      }
+    },
+    {
+      "id": "set-result-pending-review",
+      "name": "Build Result - Pending Review",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        3480,
+        140
+      ],
+      "notes": "Leaf node. The Caller uses content_hash to build the Telegram Approve/Discard buttons (truncated to 16 chars there, per Telegram's 64-byte callback_data limit) and to update telegram_message_id afterward.",
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "name": "outcome",
+              "type": "string",
+              "value": "pending_review"
+            },
+            {
+              "name": "profile",
+              "type": "string",
+              "value": "={{ $json.profile }}"
+            },
+            {
+              "name": "channel",
+              "type": "string",
+              "value": "={{ $json.channel }}"
+            },
+            {
+              "name": "day_topic",
+              "type": "string",
+              "value": "={{ $json.day_topic }}"
+            },
+            {
+              "name": "sources_consulted",
+              "type": "string",
+              "value": "={{ $json.sources_consulted }}"
+            },
+            {
+              "name": "article_title",
+              "type": "string",
+              "value": "={{ $json.article_title }}"
+            },
+            {
+              "name": "article_url",
+              "type": "string",
+              "value": "={{ $json.article_url }}"
+            },
+            {
+              "name": "draft_content",
+              "type": "string",
+              "value": "={{ $json.draft_content }}"
+            },
+            {
+              "name": "content_hash",
+              "type": "string",
+              "value": "={{ $json.content_hash }}"
+            },
+            {
+              "name": "spreadsheet_id",
+              "type": "string",
+              "value": "={{ $json.spreadsheet_id }}"
+            },
+            {
+              "name": "content_tab",
+              "type": "string",
+              "value": "={{ $json.content_tab }}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "error-trigger",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        -600,
+        500
+      ],
+      "notes": "Fires on ANY failed node in this workflow. Fail-fast by design. This is the one deliberate exception to 'no client identity inside the Engine' — it's Rob's own ops channel, not a client-facing bot, and a broken Engine affects every client at once, so one shared alert destination makes sense here.",
+      "parameters": {}
+    },
+    {
+      "id": "telegram-notify-error",
+      "name": "Notify - Critical Error",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        -360,
+        500
+      ],
+      "parameters": {
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID_ROB }}",
+        "text": "=🚨 *Content Curation Engine — error*\n\nWorkflow: {{ $json.workflow.name }}\nNode: {{ $json.execution.lastNodeExecuted }}\nError: {{ $json.execution.error.message }}\n\nRevisar ejecución en n8n.",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "MKS0sLNUxjDatoqZ",
+          "name": "Telegram - Rob"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Engine Input": {
+      "main": [
+        [
+          {
+            "node": "Read Content Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Content Log": {
+      "main": [
+        [
+          {
+            "node": "Analyze Content Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyze Content Log": {
+      "main": [
+        [
+          {
+            "node": "Daily Limit Reached?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Daily Limit Reached?": {
+      "main": [
+        [
+          {
+            "node": "Build Result - Limit Reached",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Read Sources Tab",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Sources Tab": {
+      "main": [
+        [
+          {
+            "node": "Filter Active Sources",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Active Sources": {
+      "main": [
+        [
+          {
+            "node": "Read RSS Feed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read RSS Feed": {
+      "main": [
+        [
+          {
+            "node": "Tag Source Name",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tag Source Name": {
+      "main": [
+        [
+          {
+            "node": "Dedup New Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dedup New Items": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Candidates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Candidates": {
+      "main": [
+        [
+          {
+            "node": "Any New Items?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Any New Items?": {
+      "main": [
+        [
+          {
+            "node": "DeepSeek - Filter Relevance",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Result - No New Content",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DeepSeek - Filter Relevance": {
+      "main": [
+        [
+          {
+            "node": "Parse Relevance Selection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Relevance Selection": {
+      "main": [
+        [
+          {
+            "node": "DeepSeek - Generate Draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DeepSeek - Generate Draft": {
+      "main": [
+        [
+          {
+            "node": "Build Content Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Content Row": {
+      "main": [
+        [
+          {
+            "node": "Dry Run?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dry Run?": {
+      "main": [
+        [
+          {
+            "node": "Build Result - Dry Run",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Draft (Pending Review)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Draft (Pending Review)": {
+      "main": [
+        [
+          {
+            "node": "Build Result - Pending Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Notify - Critical Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "kironlab-n8n-workflows"
+  }
+}

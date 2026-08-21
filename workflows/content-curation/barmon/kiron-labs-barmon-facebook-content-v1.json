@@ -1,0 +1,661 @@
+{
+  "name": "Kiron Labs - BarMon - Facebook Content v1",
+  "nodes": [
+    {
+      "id": "sticky-overview",
+      "name": "Sticky Note - Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -600,
+        -460
+      ],
+      "parameters": {
+        "width": 760,
+        "height": 420,
+        "content": "## BarMon — Facebook Caller v1 (v2)\n\nThin, client-owned workflow: schedule + this profile/channel's config, calls the shared Engine, then handles EVERYTHING client-specific with its own credentials — Telegram send, buttons, and the Sheets update that records the Telegram message id. The Engine itself never touches Telegram (see the Engine's own Sticky Note for why: n8n binds credentials per node at design time, so a shared node can't dynamically switch to 'whichever client's bot').\n\n**Before activating:**\n1. `spreadsheet_id` already set to BarMon's real Google Sheet (19VRjs_zOnaTmHaFqSDIXKMnU5gVccBD7zP0Wx4Z8de0) — nothing to fill in here. Note: the `profile` column was removed from `BarMon-Content` (2026-08-20, redundant now that each client has its own file) — the Engine's Sheets-append node maps columns explicitly and no longer writes a profile value.\n2. Fill in `telegram_chat_id` (BarMon's own review chat, from BarMon's own bot).\n3. Leave `dry_run = true` until drafts look right — dry run only sends a Telegram preview, nothing is logged to Sheets (matches the Engine's contract).\n4. Re-select the Engine workflow in the `Call Content Curation Engine` node after import (ships with a placeholder id).\n\n**Credentials needed:**\n- `Telegram - BarMon` — BarMon's own bot token, used for every Telegram node in this Caller.\n- `Google Sheets - Rob` — reused (same automation Google account as the Engine); needed here only for the final 'save telegram_message_id' update.\n- `Telegram - Rob` — ops channel, used only by this Caller's own Error Trigger branch (failures in scheduling/config/invocation, not inside the Engine)."
+      }
+    },
+    {
+      "id": "schedule-trigger",
+      "name": "Daily Schedule - 10:00 CDMX",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -600,
+        0
+      ],
+      "notes": "10:00 AM America/Mexico_City.",
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "triggerAtHour": 10,
+              "triggerAtMinute": 0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "set-config",
+      "name": "BarMon Facebook Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -360,
+        0
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "name": "profile",
+              "type": "string",
+              "value": "BarMon"
+            },
+            {
+              "name": "channel",
+              "type": "string",
+              "value": "Facebook"
+            },
+            {
+              "name": "spreadsheet_id",
+              "type": "string",
+              "value": "19VRjs_zOnaTmHaFqSDIXKMnU5gVccBD7zP0Wx4Z8de0"
+            },
+            {
+              "name": "sources_tab",
+              "type": "string",
+              "value": "BarMon-Sources"
+            },
+            {
+              "name": "content_tab",
+              "type": "string",
+              "value": "BarMon-Content"
+            },
+            {
+              "name": "daily_limit",
+              "type": "number",
+              "value": 1
+            },
+            {
+              "name": "telegram_chat_id",
+              "type": "string",
+              "value": "8782693638"
+            },
+            {
+              "name": "dry_run",
+              "type": "boolean",
+              "value": true
+            },
+            {
+              "name": "system_prompt_relevance",
+              "type": "string",
+              "value": "Eres el filtro de relevancia editorial de BarMon, un servicio de avalúos inmobiliarios en CDMX y Área Metropolitana. Tu tarea es revisar una lista de artículos candidatos (de fuentes de noticias inmobiliarias) y elegir el que sea más útil y relevante para un propietario de CDMX/AM que se pregunta si necesita un avalúo, quiere vender, comprar, heredar, refinanciar, o simplemente entender cuánto vale su propiedad. Prioriza datos de precios o tendencias de mercado en CDMX/zona metropolitana, cambios en tasas hipotecarias o crédito que afecten el valor percibido, e información práctica sobre el proceso de avalúo o compraventa. Evita artículos puramente institucionales para inversionistas (FIBRAs, fondos, oficinas corporativas) salvo que tengan un ángulo claro para un propietario individual. Devuelve SOLO JSON con el índice elegido, un day_topic corto (máximo 8 palabras) y tu razón."
+            },
+            {
+              "name": "system_prompt_draft",
+              "type": "string",
+              "value": "Eres BarMon, servicio de avalúos inmobiliarios en CDMX y Área Metropolitana. Escribes en voz institucional de marca (nunca en primera persona 'yo'), en español, para Facebook. Tu lector es un propietario que no sabe si necesita un avalúo.\n\nObjetivo del post: usando el artículo fuente, dale al lector un dato o idea útil y conéctalo con la pregunta de cuánto vale su propiedad o cuándo conviene avaluarla — sin sonar a anuncio todo el tiempo.\n\nCómo abrir: no empieces anunciando que 'encontramos este artículo' ni con meta-comentario tipo 'lo que nos llamó la atención es'. Ve directo a la idea, o abre con una pregunta directa al lector (ej. '¿Sabes cuánto subió el valor de tu zona este año?').\n\nLongitud: 600-900 caracteres, en párrafos cortos (2-4 párrafos).\n\nEmoji: uno por párrafo, del set 🏠 📊 📍 🔑 💰 — no lo satures.\n\nCierre: incluye un CTA (llamado a la acción), alternando entre uno suave (una reflexión útil que implica el valor de avaluar) y uno directo (invitar a escribir/contactar a BarMon) — nunca ambos en el mismo post.\n\nNo cites ni menciones el nombre del portal, medio o fuente de donde viene el dato (nunca 'según X', 'de acuerdo con Y', ni el link) — el artículo fuente es solo insumo, no algo que reportas. Toma la idea central y el dato clave, y redáctalos como si fuera análisis propio de BarMon: tu lectura del mercado, en tu voz, sin sonar a resumen o copia de otro lugar. El nombre de la fuente y el link se guardan aparte para trazabilidad interna, nunca en el texto del post.\n\nImagen: si el post lleva imagen, la elige un humano por separado al publicar — tú solo escribes el texto.\n\nNo inventes cifras que no estén en el artículo fuente. No uses inglés en ningún momento."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "execute-engine",
+      "name": "Call Content Curation Engine",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        -120,
+        0
+      ],
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "REPLACE_WITH_ENGINE_WORKFLOW_ID",
+          "cachedResultName": "Kiron Labs - Content Curation Engine v1"
+        },
+        "workflowInputs": {
+          "mappingMode": "autoMapInputData"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "if-outcome-limit-reached",
+      "name": "Outcome: Limit Reached?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        120,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.outcome }}",
+              "rightValue": "limit_reached",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "telegram-notify-limit",
+      "name": "Notify - Limit Reached",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        360,
+        -280
+      ],
+      "parameters": {
+        "chatId": "={{ $('BarMon Facebook Config').first().json.telegram_chat_id }}",
+        "text": "=⏹️ {{ $json.profile }} / {{ $json.channel }}: límite diario ({{ $json.daily_limit }}) ya alcanzado hoy. No se generó contenido nuevo.",
+        "additionalFields": {}
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram - BarMon"
+        }
+      }
+    },
+    {
+      "id": "noop-end-limit",
+      "name": "End - Limit Reached",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        600,
+        -280
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "if-outcome-no-content",
+      "name": "Outcome: No New Content?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        360,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.outcome }}",
+              "rightValue": "no_new_content",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "telegram-notify-no-content",
+      "name": "Notify - No New Content",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        600,
+        -140
+      ],
+      "parameters": {
+        "chatId": "={{ $('BarMon Facebook Config').first().json.telegram_chat_id }}",
+        "text": "=ℹ️ {{ $json.profile }} / {{ $json.channel }}: no hay artículos nuevos sin usar en las fuentes activas hoy.",
+        "additionalFields": {}
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram - BarMon"
+        }
+      }
+    },
+    {
+      "id": "noop-end-no-content",
+      "name": "End - No New Content",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        840,
+        -140
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "if-outcome-dry-run",
+      "name": "Outcome: Dry Run?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        600,
+        140
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.outcome }}",
+              "rightValue": "dry_run",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "telegram-dry-run-preview",
+      "name": "Notify - Dry Run Preview",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        840,
+        0
+      ],
+      "notes": "Dry run never reaches Sheets (per the Engine's contract) — this preview is the only output.",
+      "parameters": {
+        "chatId": "={{ $('BarMon Facebook Config').first().json.telegram_chat_id }}",
+        "text": "=🧪 DRY RUN — {{ $json.profile }} / {{ $json.channel }} — nada se guardó en Sheets.\n\nTema del día: {{ $json.day_topic }}\nFuente: {{ $json.sources_consulted }}\nArtículo: {{ $json.article_title }}\n\nDraft generado:\n{{ $json.draft_content }}",
+        "additionalFields": {}
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram - BarMon"
+        }
+      }
+    },
+    {
+      "id": "noop-end-dry-run",
+      "name": "End - Dry Run",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1080,
+        0
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "code-prepare-buttons",
+      "name": "Prepare Telegram Buttons",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        840,
+        280
+      ],
+      "notes": "Truncates content_hash to 16 chars for callback_data — Telegram's callback_data limit is 64 bytes, and 'barmon_approve:' + a full 64-char SHA-256 would overflow it. Matches the production Rob-LinkedIn convention (content_hash.slice(0,16)).",
+      "parameters": {
+        "jsCode": "const row = $json;\nconst shortHash = row.content_hash.slice(0, 16);\nreturn [{ json: { ...row, short_hash: shortHash } }];"
+      }
+    },
+    {
+      "id": "telegram-send-review",
+      "name": "Send Draft for Review",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1080,
+        280
+      ],
+      "parameters": {
+        "chatId": "={{ $('BarMon Facebook Config').first().json.telegram_chat_id }}",
+        "text": "=📝 *{{ $json.profile }} / {{ $json.channel }}* — {{ $json.day_topic }}\n\n{{ $json.draft_content }}\n\n_Fuente: {{ $json.sources_consulted }} — {{ $json.article_url }}_",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        },
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "✅ Aprobar",
+                    "additionalFields": {
+                      "callback_data": "=barmon_approve|{{ $json.short_hash }}"
+                    }
+                  },
+                  {
+                    "text": "❌ Descartar",
+                    "additionalFields": {
+                      "callback_data": "=barmon_discard|{{ $json.short_hash }}"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram - BarMon"
+        }
+      }
+    },
+    {
+      "id": "sheets-update-message-id",
+      "name": "Save Telegram Message ID",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1320,
+        280
+      ],
+      "notes": "Matches the row the Engine just appended, by full content_hash (not the truncated one used in callback_data).",
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $('Prepare Telegram Buttons').first().json.spreadsheet_id }}"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "={{ $('Prepare Telegram Buttons').first().json.content_tab }}"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "matchingColumns": [
+            "content_hash"
+          ],
+          "value": {
+            "content_hash": "={{ $('Prepare Telegram Buttons').first().json.content_hash }}",
+            "telegram_message_id": "={{ $('Send Draft for Review').first().json.message_id }}"
+          },
+          "schema": [
+            {
+              "id": "content_hash",
+              "displayName": "content_hash",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "telegram_message_id",
+              "displayName": "telegram_message_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ]
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "IcCapGhz6b79YwIJ",
+          "name": "Google Sheets - Rob"
+        }
+      }
+    },
+    {
+      "id": "noop-end-pending-review",
+      "name": "End - Pending Review",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1560,
+        280
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "error-trigger",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        -600,
+        500
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "telegram-notify-error",
+      "name": "Notify - Critical Error",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        -360,
+        500
+      ],
+      "notes": "Covers failures in this Caller itself (schedule/config/invocation/Telegram-send/Sheets-update) — Engine-internal failures are already covered by the Engine's own Error Trigger.",
+      "parameters": {
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID_ROB }}",
+        "text": "=🚨 *BarMon Facebook Caller — error*\n\nNode: {{ $json.execution.lastNodeExecuted }}\nError: {{ $json.execution.error.message }}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "MKS0sLNUxjDatoqZ",
+          "name": "Telegram - Rob"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Daily Schedule - 10:00 CDMX": {
+      "main": [
+        [
+          {
+            "node": "BarMon Facebook Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "BarMon Facebook Config": {
+      "main": [
+        [
+          {
+            "node": "Call Content Curation Engine",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Content Curation Engine": {
+      "main": [
+        [
+          {
+            "node": "Outcome: Limit Reached?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Outcome: Limit Reached?": {
+      "main": [
+        [
+          {
+            "node": "Notify - Limit Reached",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Outcome: No New Content?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify - Limit Reached": {
+      "main": [
+        [
+          {
+            "node": "End - Limit Reached",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Outcome: No New Content?": {
+      "main": [
+        [
+          {
+            "node": "Notify - No New Content",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Outcome: Dry Run?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify - No New Content": {
+      "main": [
+        [
+          {
+            "node": "End - No New Content",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Outcome: Dry Run?": {
+      "main": [
+        [
+          {
+            "node": "Notify - Dry Run Preview",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Telegram Buttons",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify - Dry Run Preview": {
+      "main": [
+        [
+          {
+            "node": "End - Dry Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Telegram Buttons": {
+      "main": [
+        [
+          {
+            "node": "Send Draft for Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Draft for Review": {
+      "main": [
+        [
+          {
+            "node": "Save Telegram Message ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Telegram Message ID": {
+      "main": [
+        [
+          {
+            "node": "End - Pending Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Notify - Critical Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "kironlab-n8n-workflows"
+  }
+}

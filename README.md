@@ -18,8 +18,9 @@ infra/          → docker-compose.yml and server deploy script (shared, single 
 workflows/
   content-curation/     → workflow type: discovers articles, filters with AI, generates
                            a bilingual draft, human review via Telegram
-    engine/              → parameterized engine workflow (Execute Workflow) — in progress
-    rob-linkedin/         → first profile in production
+    engine/              → parameterized engine workflow (Execute Workflow)
+    rob-linkedin/         → profile in production (LinkedIn)
+    barmon/               → profile in production (Facebook)
 ```
 
 The repo is organized **by workflow type first, profile second**. The same content-curation pattern is reused across profiles, so a bug or improvement in the pattern is fixed once and applies to every profile that uses it.
@@ -34,7 +35,7 @@ Instead of duplicating the whole workflow per profile, `content-curation` is spl
 | **Caller** | Profile's own Schedule Trigger + builds its config (prompts, channel, limit, sheet) → calls the Engine | Yes, but thin (few nodes) |
 | **Approval** | Telegram Trigger tied to the profile's own bot → matches the row in Sheets → updates status | Yes — necessarily, each profile has its own bot/review chat |
 
-Currently in progress: the Engine is being designed on top of Rob's workflow (first profile tested in production). Once validated, `rob-linkedin/` splits into Caller + Approval, and adding a new profile becomes building just those two thin pieces.
+The Engine (`engine/kiron-labs-content-curation-engine-v1.json`) is extracted as a single workflow invoked via `Execute Workflow`. Profiles like `rob-linkedin/` and `barmon/` build their Caller + Approval pieces on top of it, so adding a new profile is just those two thin pieces.
 
 ## Current workflows (`content-curation/rob-linkedin/`)
 
@@ -42,6 +43,13 @@ Currently in progress: the Engine is being designed on top of Rob's workflow (fi
 |---|---|---|---|
 | `kiron-lab-rob-rss-sources-health-check-v1.json` | Kiron Labs - Rob - RSS Sources Health Check v1 | Weekly validation of every URL in the `RSS-Sources` tab, alerts via Telegram if any active source is broken | Monday 8:00 AM (CDMX) |
 | `kiron-lab-rob-linkedin-content-curation-v1.json` | Kiron Labs - Rob - LinkedIn Content Curation v1 | Current version (pre-Engine, monolithic): finds articles, filters with DeepSeek, generates a bilingual ES/EN draft, sends it for Telegram review | Mon–Fri 10:00 AM (CDMX) |
+
+## Current workflows (`content-curation/barmon/`)
+
+| File | n8n name | What it does |
+|---|---|---|
+| `kiron-labs-barmon-facebook-content-v1.json` | Kiron Labs - BarMon - Facebook Content v1 | Caller: builds BarMon's config and posts content to Facebook via the shared Engine |
+| `kiron-labs-barmon-telegram-approval-v1.json` | Kiron Labs - BarMon - Telegram Approval v1 | Approval: Telegram Trigger tied to BarMon's bot → updates review status |
 
 ### Daily topic rotation
 

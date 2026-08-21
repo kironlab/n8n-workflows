@@ -1,0 +1,530 @@
+{
+  "name": "Kiron Labs - BarMon - Telegram Approval v1",
+  "nodes": [
+    {
+      "id": "sticky-overview",
+      "name": "Sticky Note - Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -600,
+        -380
+      ],
+      "parameters": {
+        "width": 760,
+        "height": 340,
+        "content": "## BarMon — Telegram Approval v1 (v2)\n\nOwn Telegram Trigger bound to BarMon's own bot (per the hybrid architecture: the Engine holds no client identity, so each client's Caller AND Approval workflow use their own bot credential). Listens for the Approve/Discard button taps sent by the Facebook/Instagram Caller's \"Send Draft for Review\" node, matches the row in `BarMon-Content` by a HASH PREFIX (not exact match — see note below), and updates its status.\n\n**Hash matching fix:** `callback_data` carries only the first 16 chars of `content_hash` (Telegram's `callback_data` has a 64-byte limit — a full SHA-256 plus the prefix would overflow it). This workflow matches with `startsWith`, same convention as the production Rob-LinkedIn workflow.\n\n**Who approves:** confirm with Rob before activating — kickoff assumption is Rob approves initially (the cousin/valuador isn't in the content loop yet).\n\n**Publish stays manual:** approving here does NOT post to Facebook/Instagram. It just marks the row `approved` so Rob knows it's cleared to post by hand.\n\n**Credentials needed:**\n- `Telegram - BarMon` (must be the SAME bot used by the Callers' \"Send Draft for Review\" node, so this Trigger receives that bot's callback_query updates)\n- `Google Sheets - Rob` (reused — same automation Google account as the Engine/Callers)\n- `Telegram - Rob` (ops channel, Error Trigger branch only)\n\n**Setup note:** after importing, set this bot's webhook/polling in n8n (Telegram Trigger handles this automatically once the credential is attached and the workflow is activated)."
+      }
+    },
+    {
+      "id": "telegram-trigger",
+      "name": "Telegram Trigger - BarMon Bot",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -600,
+        0
+      ],
+      "parameters": {
+        "updates": [
+          "callback_query"
+        ]
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram - BarMon"
+        }
+      }
+    },
+    {
+      "id": "code-parse-callback",
+      "name": "Parse Callback",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -360,
+        0
+      ],
+      "notes": "Extracts action + short_hash from callback_data (format: 'barmon_approve|<16-char hash>' or 'barmon_discard|<16-char hash>' — pipe separator and truncated hash, matching what the Callers actually send). Flags anything else as invalid instead of throwing, since a shared bot could in theory receive unrelated callbacks.",
+      "parameters": {
+        "jsCode": "const cb = $json.callback_query;\nconst data = cb && cb.data ? cb.data : '';\nconst [prefix, shortHash] = data.split('|');\nconst actionMap = { barmon_approve: 'approved', barmon_discard: 'discarded' };\nconst valid = Boolean(shortHash) && Object.prototype.hasOwnProperty.call(actionMap, prefix);\n\nreturn [{\n  json: {\n    valid,\n    action: valid ? actionMap[prefix] : null,\n    short_hash: shortHash || null,\n    callback_query_id: cb ? cb.id : null,\n    chat_id: cb && cb.message ? cb.message.chat.id : null,\n    message_id: cb && cb.message ? cb.message.message_id : null,\n    original_text: cb && cb.message ? cb.message.text : '',\n    approver_name: cb && cb.from ? (cb.from.first_name || cb.from.username || 'desconocido') : 'desconocido'\n  }\n}];"
+      }
+    },
+    {
+      "id": "if-valid-callback",
+      "name": "Valid BarMon Callback?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -120,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "noop-ignore",
+      "name": "Ignore - Not BarMon Callback",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        120,
+        200
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "sheets-read-content",
+      "name": "Read BarMon-Content",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        120,
+        -80
+      ],
+      "notes": "Reads the full tab and matches by hash prefix in the next Code node — same pattern as the Engine, kept consistent on purpose. documentId is BarMon's real spreadsheet (19VRjs_zOnaTmHaFqSDIXKMnU5gVccBD7zP0Wx4Z8de0), same file used by the Callers.",
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "19VRjs_zOnaTmHaFqSDIXKMnU5gVccBD7zP0Wx4Z8de0"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "BarMon-Content"
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "IcCapGhz6b79YwIJ",
+          "name": "Google Sheets - Rob"
+        }
+      }
+    },
+    {
+      "id": "code-find-row",
+      "name": "Find Row by Hash",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        360,
+        -80
+      ],
+      "notes": "Matches by startsWith, not equality — callback_data only carries the first 16 chars of the full content_hash stored in Sheets.",
+      "parameters": {
+        "jsCode": "const ctx = $('Parse Callback').first().json;\nconst row = items.find(i => (i.json.content_hash || '').startsWith(ctx.short_hash));\n\nreturn [{\n  json: {\n    ...ctx,\n    content_hash: row ? row.content_hash : null,\n    row_found: Boolean(row),\n    current_status: row ? row.status : null,\n    draft_content: row ? row.draft_content : null\n  }\n}];"
+      }
+    },
+    {
+      "id": "if-row-found",
+      "name": "Row Found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        600,
+        -80
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.row_found }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "telegram-row-not-found",
+      "name": "Notify - Row Not Found",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        840,
+        80
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "editMessageText",
+        "chatId": "={{ $json.chat_id }}",
+        "messageId": "={{ $json.message_id }}",
+        "text": "={{ $json.original_text }}\n\n⚠️ No se encontró la fila en BarMon-Content (hash={{ $json.short_hash }}). Revisa manualmente en Sheets.",
+        "additionalFields": {}
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram - BarMon"
+        }
+      }
+    },
+    {
+      "id": "if-already-decided",
+      "name": "Already Decided?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        840,
+        -200
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.current_status }}",
+              "rightValue": "pending_review",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "telegram-already-decided",
+      "name": "Notify - Already Decided",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1080,
+        -320
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "editMessageText",
+        "chatId": "={{ $json.chat_id }}",
+        "messageId": "={{ $json.message_id }}",
+        "text": "={{ $json.original_text }}\n\nℹ️ Esta publicación ya estaba marcada como *{{ $json.current_status }}* — no se hizo ningún cambio.",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram - BarMon"
+        }
+      }
+    },
+    {
+      "id": "sheets-update-status",
+      "name": "Update Status in Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1080,
+        -80
+      ],
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "19VRjs_zOnaTmHaFqSDIXKMnU5gVccBD7zP0Wx4Z8de0"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "BarMon-Content"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "matchingColumns": [
+            "content_hash"
+          ],
+          "value": {
+            "content_hash": "={{ $json.content_hash }}",
+            "status": "={{ $json.action }}"
+          },
+          "schema": [
+            {
+              "id": "content_hash",
+              "displayName": "content_hash",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ]
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "IcCapGhz6b79YwIJ",
+          "name": "Google Sheets - Rob"
+        }
+      }
+    },
+    {
+      "id": "telegram-confirm-decision",
+      "name": "Update Review Message",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1320,
+        -80
+      ],
+      "notes": "Edits the original message to show the final decision and removes the inline buttons (empty inlineKeyboard) so it can't be tapped twice.",
+      "parameters": {
+        "resource": "message",
+        "operation": "editMessageText",
+        "chatId": "={{ $json.chat_id }}",
+        "messageId": "={{ $json.message_id }}",
+        "text": "={{ $json.original_text }}\n\n{{ $json.action === 'approved' ? '✅ Aprobado' : '❌ Descartado' }} por {{ $json.approver_name }}. {{ $json.action === 'approved' ? 'Pendiente de publicar manualmente.' : '' }}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        },
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {
+          "rows": []
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram - BarMon"
+        }
+      }
+    },
+    {
+      "id": "noop-complete",
+      "name": "Approval Complete",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1560,
+        -80
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "error-trigger",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        -600,
+        400
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "telegram-notify-error",
+      "name": "Notify - Critical Error",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        -360,
+        400
+      ],
+      "parameters": {
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID_ROB }}",
+        "text": "=🚨 *BarMon Telegram Approval — error*\n\nNode: {{ $json.execution.lastNodeExecuted }}\nError: {{ $json.execution.error.message }}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "MKS0sLNUxjDatoqZ",
+          "name": "Telegram - Rob"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Telegram Trigger - BarMon Bot": {
+      "main": [
+        [
+          {
+            "node": "Parse Callback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Callback": {
+      "main": [
+        [
+          {
+            "node": "Valid BarMon Callback?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid BarMon Callback?": {
+      "main": [
+        [
+          {
+            "node": "Read BarMon-Content",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ignore - Not BarMon Callback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read BarMon-Content": {
+      "main": [
+        [
+          {
+            "node": "Find Row by Hash",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Row by Hash": {
+      "main": [
+        [
+          {
+            "node": "Row Found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Row Found?": {
+      "main": [
+        [
+          {
+            "node": "Already Decided?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Notify - Row Not Found",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Already Decided?": {
+      "main": [
+        [
+          {
+            "node": "Notify - Already Decided",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Update Status in Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Status in Sheet": {
+      "main": [
+        [
+          {
+            "node": "Update Review Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Review Message": {
+      "main": [
+        [
+          {
+            "node": "Approval Complete",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Notify - Critical Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "kironlab-n8n-workflows"
+  }
+}
